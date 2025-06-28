@@ -633,24 +633,62 @@ const Placement3D = (() => {
             processedContainers.push(filledContainer);
 
             if (remainingUnplacedItems.length > 0) {
-                console.log(`Placement3D: Container ID ${currentProcessingContainerId} is full. ${remainingUnplacedItems.length} items remain. Attempting to place in a new container.`);
+                console.log(`Placement3D: Container ID ${currentProcessingContainerId} (Type: ${currentContainerGroup.type}) is full or could not fit all items. ${remainingUnplacedItems.length} items remain.`);
 
-                // Create a new container "shell" for the remaining items.
-                // It should ideally use the same type, or a defined fallback/next type.
-                // For now, assume same type.
-                const nextContainerType = currentContainerGroup.type; // Or determine dynamically if needed
+                // Sub-process: Find Best Additional Container for remainingUnplacedItems
+                let chosenSpillOverType = null;
+                // Define the order of container types to try for spill-over
+                const spillOverContainerTypes = ['20ftGPWood', '40ftGPWood', '40ftHCWood']; // Example, make this dynamic if possible
+
+                for (const trialType of spillOverContainerTypes) {
+                    const trialConfig = ContainerModule.getContainerConfig(trialType);
+                    if (!trialConfig) {
+                        console.warn(`Placement3D: Spill-over trial - Config not found for type ${trialType}. Skipping.`);
+                        continue;
+                    }
+
+                    // Create deep copies of items for trial packing to avoid mutating original items' state
+                    const trialItems = JSON.parse(JSON.stringify(remainingUnplacedItems));
+
+                    // Reset 'placed' and 'placement' for trial items
+                    trialItems.forEach(item => {
+                        item.placed = false;
+                        item.placement = { x: 0, y: 0, z: 0, layer: -1, containerId: -1 };
+                    });
+
+                    console.log(`Placement3D: Trial packing ${trialItems.length} spill-over items into ${trialType}`);
+                    // Use a null scene for trial packing to avoid drawing, or a temporary non-visible scene if Load3D requires it
+                    runPlacementInternal(null, trialItems, trialConfig, `trial-${currentProcessingContainerId}-${trialType}`);
+
+                    const allTrialItemsPlaced = trialItems.every(item => item.placed);
+
+                    if (allTrialItemsPlaced) {
+                        chosenSpillOverType = trialType;
+                        console.log(`Placement3D: Spill-over items fit into ${chosenSpillOverType}.`);
+                        break;
+                    } else {
+                        console.log(`Placement3D: Spill-over items DO NOT all fit into ${trialType}. Attempting next type.`);
+                    }
+                }
+
+                if (!chosenSpillOverType) {
+                    // If no container type could fit all spill-over items, default to the smallest type for the next attempt.
+                    // This might lead to further spill-over, which will be handled by subsequent iterations.
+                    chosenSpillOverType = spillOverContainerTypes[0] || currentContainerGroup.type; // Fallback to current type if list is empty
+                    console.log(`Placement3D: No single spill-over container type fit all items. Defaulting next attempt to ${chosenSpillOverType}.`);
+                }
+
                 const newContainerShell = {
-                    type: nextContainerType,
-                    items: remainingUnplacedItems,
-                    usedWeight: 0, // Will be recalculated when these items are placed
+                    type: chosenSpillOverType,
+                    items: remainingUnplacedItems, // These are the original remaining items, not trialItems
+                    usedWeight: 0,
                     usedVolume: 0,
-                    // id will be assigned when it's processed from the queue
                 };
                 containersToProcess.push(newContainerShell);
-                console.log(`Placement3D: Added new container shell of type ${nextContainerType} to processing queue for ${remainingUnplacedItems.length} items.`);
+                console.log(`Placement3D: Added new container shell of type ${chosenSpillOverType} to processing queue for ${remainingUnplacedItems.length} items.`);
             }
         }
-        console.log("Placement3D: Finished computePlacementTightest. Total containers processed/created:", processedContainers.length);
+        console.log("Placement3D: Finished computePlacementTightest. Total containers resulting from placement:", processedContainers.length);
         return processedContainers;
     }
 
