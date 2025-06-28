@@ -471,8 +471,8 @@ const Placement3D = (() => {
         const allocatedContainersOutput = [];
         if (!scoItems || scoItems.length === 0) return allocatedContainersOutput;
 
-        if (!ContainerModule || !ContainerModule.getContainerConfig || !ContainerModule.getAvailableContainerTypes) {
-            console.error("Placement3D: ContainerModule not properly set for enhanced placeSCO (missing getContainerConfig or getAvailableContainerTypes).");
+        if (!ContainerModule || !ContainerModule.getContainerConfig || typeof ContainerModule.getContainerTypes !== 'function') {
+            console.error("Placement3D: ContainerModule not properly set for enhanced placeSCO (missing getContainerConfig or getContainerTypes function).");
             // Fallback to original simple logic with a default type if advanced functions aren't available
             return legacyPlaceSCO(scoItems);
         }
@@ -489,9 +489,9 @@ const Placement3D = (() => {
         const totalHeightSum = scoItems.reduce((sum, item) => sum + (parseFloat(item.height) || 1), 0);
         const representativeItemHeight = scoItems.length > 0 ? Math.max(1, totalHeightSum / scoItems.length) : 50; // Default 50cm if no items or all invalid height
 
-        const availableContainerTypes = ContainerModule.getAvailableContainerTypes(); // e.g., ['20ftGPWood', '40ftGPWood', '40ftHCWood']
-        if (!availableContainerTypes || availableContainerTypes.length === 0) {
-            console.error("Placement3D: No available container types found from ContainerModule. Falling back to legacyPlaceSCO.");
+        const availableContainerTypes = ContainerModule.getContainerTypes(); // Corrected function name
+        if (!Array.isArray(availableContainerTypes) || availableContainerTypes.length === 0) {
+            console.error("Placement3D: No available container types found or invalid format from ContainerModule.getContainerTypes(). Falling back to legacyPlaceSCO.");
             return legacyPlaceSCO(scoItems);
         }
 
@@ -499,25 +499,36 @@ const Placement3D = (() => {
         let bestScore = -1;
 
         // Try to fit all items into a single best container
+        console.log(`Placement3D: Total item weight: ${totalItemWeight}, Total item volume: ${totalItemVolume}`);
         for (const typeKey of availableContainerTypes) {
             const config = ContainerModule.getContainerConfig(typeKey);
-            if (!config || !config.usablePayload || !config.usableVolume || !config.height) continue;
+            if (!config || !config.usablePayload || !config.usableVolume || !config.height) {
+                console.log(`Placement3D: Skipping type ${typeKey} due to missing config or essential properties.`);
+                continue;
+            }
 
-            if (totalItemWeight <= config.usablePayload && totalItemVolume <= config.usableVolume) {
+            console.log(`Placement3D: Evaluating container type: ${typeKey}, Payload: ${config.usablePayload}, Volume: ${config.usableVolume}, Height: ${config.height}`);
+            const weightCheck = totalItemWeight <= config.usablePayload;
+            const volumeCheck = totalItemVolume <= config.usableVolume;
+            console.log(`Placement3D:   Weight check for ${typeKey}: ${weightCheck} (Items: ${totalItemWeight} vs Container: ${config.usablePayload})`);
+            console.log(`Placement3D:   Volume check for ${typeKey}: ${volumeCheck} (Items: ${totalItemVolume} vs Container: ${config.usableVolume})`);
+
+            if (weightCheck && volumeCheck) {
                 const potentialLayers = Math.floor(config.height / representativeItemHeight);
-                // Score: Primary: layers. Secondary: negative wasted volume (less waste is better)
-                // Adding a small epsilon to layers to ensure it's prioritized heavily.
-                const currentScore = potentialLayers * 1000000 - (config.usableVolume - totalItemVolume);
+                const wastedVolume = config.usableVolume - totalItemVolume;
+                const currentScore = potentialLayers * 1000000 - wastedVolume; // Higher score is better
 
+                console.log(`Placement3D:   Type ${typeKey} fits. Potential Layers: ${potentialLayers}, Wasted Volume: ${wastedVolume}, Score: ${currentScore}`);
 
-                if (currentScore > bestScore) {
+                if (bestSingleContainerChoice === null || currentScore > bestScore) {
                     bestScore = currentScore;
                     bestSingleContainerChoice = typeKey;
-                } else if (currentScore === bestScore && bestSingleContainerChoice) {
-                    // If scores are equal (same layers, same wasted volume), prefer smaller container by volume
+                    console.log(`Placement3D:   New best choice: ${typeKey} with score ${bestScore}`);
+                } else if (currentScore === bestScore) {
                     const currentBestConfig = ContainerModule.getContainerConfig(bestSingleContainerChoice);
-                    if (config.usableVolume < currentBestConfig.usableVolume) {
+                    if (config.usableVolume < currentBestConfig.usableVolume) { // Prefer smaller volume if score is identical
                         bestSingleContainerChoice = typeKey;
+                        console.log(`Placement3D:   Equal score, but ${typeKey} is smaller. New best choice: ${typeKey}`);
                     }
                 }
             }
@@ -553,8 +564,8 @@ const Placement3D = (() => {
 
         if (ContainerModule && ContainerModule.getContainerConfig) {
             // Try to get a list of types and pick the first one as default, or fallback to hardcoded
-            const availableTypes = ContainerModule.getAvailableContainerTypes ? ContainerModule.getAvailableContainerTypes() : [];
-            if (availableTypes.length > 0) {
+            const availableTypes = typeof ContainerModule.getContainerTypes === 'function' ? ContainerModule.getContainerTypes() : [];
+            if (Array.isArray(availableTypes) && availableTypes.length > 0) {
                 defaultContainerType = availableTypes[0];
             }
             cfg = ContainerModule.getContainerConfig(defaultContainerType);
@@ -563,10 +574,20 @@ const Placement3D = (() => {
         if (!cfg) { // If still no config (e.g. ContainerModule missing, or default type not found)
             console.error(`Placement3D: legacyPlaceSCO - Default container type "${defaultContainerType}" config not found or ContainerModule issue. Cannot perform intelligent allocation.`);
             // Critical fallback: just put all items in one "unknown" container shell.
-            // This is not ideal but prevents total failure if configs are missing.
-             containers.push({ type: "unknown_fallback", items: scoItems.map(item => ({...item})), usedWeight: 0, usedVolume: 0 });
-             scoItems.forEach(item => {
-                containers[0].usedWeight += parseFloat(item.weight) || 0;
+             containers.push({ type: "unknown_fallback", items: scoItems.map(item => ({...item})), usedWeight: 0, usedVolume: 0 }); // Ensure items are copied
+             scoItems.forEach(item => { // Calculate weight/volume for the fallback container
+                if(containers[0].items.length > 0) { // Check if items were actually added
+                    containers[0].usedWeight += parseFloat(item.weight) || 0;
+                    const w = parseFloat(item.width) || 0;
+                    const l = parseFloat(item.length) || 0;
+                    const h = parseFloat(item.height) || 0;
+                    containers[0].usedVolume += w * l * h;
+                }
+             });
+            return containers;
+        }
+
+        console.log(`Placement3D: legacyPlaceSCO using default type: ${defaultContainerType}`);
                 const w = parseFloat(item.width) || 0;
                 const l = parseFloat(item.length) || 0;
                 const h = parseFloat(item.height) || 0;
