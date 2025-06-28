@@ -1,0 +1,10 @@
+[
+    {
+        "name": "4. Pallets with Boxes",
+        "items": [
+          { "name":"EuroPallet", "type":"pallet", "width": 80, "length": 120, "height": 60,  "weight": 25,   "stackable": true,  "tiltable": false, "qty": 5 },
+          { "name":"Carton",      "type":"box",    "width": 40, "length": 60,  "height": 50,  "weight": 10,   "stackable": true,  "tiltable": false, "qty": 2000 }
+        ]
+      }
+  ]
+  
