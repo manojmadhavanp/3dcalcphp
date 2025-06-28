@@ -552,8 +552,8 @@ const Placement3D = (() => {
 
         if (!ContainerModule) {
             console.error("Placement3D: ContainerModule is not set for computePlacementTightest.");
-            allocatedContainers.forEach((c, i) => { // Ensure containers have IDs and items default placement
-                c.id = i;
+            allocatedContainers.forEach((c, i) => {
+                c.id = `initial-${i}`; // Ensure unique initial IDs
                 c.items.forEach(item => {
                     item.placed = false;
                     item.placement = { x: 0, y: 0, z: 0, layer: -1, containerId: c.id };
@@ -563,33 +563,95 @@ const Placement3D = (() => {
         }
 
         // Clear scene once before processing all containers for this batch, if scene is available
-        if (currentScene && typeof Load3D !== 'undefined' && Load3D.clearItems) {
+        if (currentScene && typeof window.Load3D !== 'undefined' && Load3D.clearItems) {
             console.log("Placement3D: Clearing scene once before drawing all containers.");
             Load3D.clearItems(currentScene);
+            // Note: drawing will now happen per container *after* it's fully processed by runPlacementInternal
         }
 
-        return allocatedContainers.map((container, index) => {
-            console.log(`Placement3D: Processing container #${index} of type ${container.type} with ${container.items.length} items.`);
-            container.id = index;
+        const processedContainers = [];
+        const containersToProcess = [...allocatedContainers]; // Create a mutable copy to use as a queue
+        let containerCounter = 0; // For generating unique container IDs
 
-            const containerConfig = ContainerModule.getContainerConfig(container.type);
+        while (containersToProcess.length > 0) {
+            const currentContainerGroup = containersToProcess.shift(); // Get the next group of items/container shell
+
+            // Assign a unique ID to this container instance for this placement run
+            // This ID is primarily for logging and distinguishing container instances during placement.
+            // The original container object from allocatedContainers might have its own 'id'
+            // but we need to ensure each processing attempt of a container (even if it's a new one for overflow) gets a distinct ID for runPlacementInternal.
+            const currentProcessingContainerId = containerCounter++;
+
+            // Ensure the container object has an 'id' property that runPlacementInternal can use.
+            // If currentContainerGroup already has an id, we might want to preserve it or use the new one.
+            // For simplicity, let's assign the new processing ID.
+            currentContainerGroup.id = currentProcessingContainerId;
+
+
+            console.log(`Placement3D: Processing items for container ID: ${currentProcessingContainerId}, Type: ${currentContainerGroup.type} with ${currentContainerGroup.items.length} items.`);
+
+            const containerConfig = ContainerModule.getContainerConfig(currentContainerGroup.type);
             if (!containerConfig) {
-                console.error(`Placement3D: Config not found for container type ${container.type}. Skipping detailed placement for this container.`);
-                container.items.forEach(item => {
+                console.error(`Placement3D: Config not found for container type ${currentContainerGroup.type}. Skipping detailed placement for this group of items.`);
+                // Mark all items in this group as unplaced and move them to a "dummy" processed container
+                // or handle them as completely unplaceable.
+                currentContainerGroup.items.forEach(item => {
                     item.placed = false;
-                    item.placement = { x: 0, y: 0, z: 0, layer: -1, containerId: container.id };
+                    item.placement = { x: 0, y: 0, z: 0, layer: -1, containerId: currentProcessingContainerId, error: "Config not found" };
                 });
-                return container;
+                processedContainers.push(currentContainerGroup); // Add it to processed with unplaced items
+                continue; // Move to the next container in containersToProcess
             }
 
-            // runPlacementInternal will modify items in container.items directly
-            // and handle its own drawing for the items it places.
-            runPlacementInternal(currentScene, container.items, containerConfig, container.id, (index === 0 && allocatedContainers.length > 1));
-            // The last boolean indicates if it's the first of multiple containers, to manage scene clearing.
-            // This is still a bit crude; a better Load3D would handle object groups by containerId.
+            // runPlacementInternal will modify items in currentContainerGroup.items directly.
+            // The last boolean for scene clearing is no longer needed here as scene is cleared once initially.
+            runPlacementInternal(currentScene, currentContainerGroup.items, containerConfig, currentProcessingContainerId);
 
-            return container;
-        });
+            const successfullyPlacedItems = [];
+            const remainingUnplacedItems = [];
+
+            currentContainerGroup.items.forEach(item => {
+                if (item.placed) {
+                    successfullyPlacedItems.push(item);
+                } else {
+                    // Reset placement attempt details for retry in a new container
+                    item.placement = { x: 0, y: 0, z: 0, layer: -1, containerId: -1 }; // Reset containerId for next attempt
+                    remainingUnplacedItems.push(item);
+                }
+            });
+
+            // Update the current container group with only the items that were successfully placed in it.
+            const filledContainer = {
+                ...currentContainerGroup, // type, original id if any, etc.
+                id: currentProcessingContainerId, // The ID used for this specific packing attempt
+                items: successfullyPlacedItems,
+                // Update usedWeight and usedVolume if necessary, though placeSCO should have done initial estimates.
+                // For now, we assume this is mainly for display/reporting.
+                usedWeight: successfullyPlacedItems.reduce((sum, item) => sum + (parseFloat(item.weight) || 0), 0),
+                usedVolume: successfullyPlacedItems.reduce((sum, item) => sum + ((parseFloat(item.width) || 0) * (parseFloat(item.length) || 0) * (parseFloat(item.height) || 0)), 0)
+            };
+            processedContainers.push(filledContainer);
+
+            if (remainingUnplacedItems.length > 0) {
+                console.log(`Placement3D: Container ID ${currentProcessingContainerId} is full. ${remainingUnplacedItems.length} items remain. Attempting to place in a new container.`);
+
+                // Create a new container "shell" for the remaining items.
+                // It should ideally use the same type, or a defined fallback/next type.
+                // For now, assume same type.
+                const nextContainerType = currentContainerGroup.type; // Or determine dynamically if needed
+                const newContainerShell = {
+                    type: nextContainerType,
+                    items: remainingUnplacedItems,
+                    usedWeight: 0, // Will be recalculated when these items are placed
+                    usedVolume: 0,
+                    // id will be assigned when it's processed from the queue
+                };
+                containersToProcess.push(newContainerShell);
+                console.log(`Placement3D: Added new container shell of type ${nextContainerType} to processing queue for ${remainingUnplacedItems.length} items.`);
+            }
+        }
+        console.log("Placement3D: Finished computePlacementTightest. Total containers processed/created:", processedContainers.length);
+        return processedContainers;
     }
 
     // Store the original detailed placement function, which is now correctly adapted.
