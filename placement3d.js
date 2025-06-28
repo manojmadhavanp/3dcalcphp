@@ -179,90 +179,117 @@ const Placement3D = (() => {
 
         // Process each item from the sorted list for this container
         for (const item of sortedItemsForThisContainer) {
-            let itemHasBeenPlaced = false; // Flag for the current item
+            // Ensure placement object exists and item is marked as not placed initially for this attempt
+            if (!item.placement) item.placement = {};
+            item.placed = false;
+            let itemHasBeenPlaced = false;
+
+            let isItemRotatable = false;
+            if (typeof item.rotatableZ === 'boolean') {
+                isItemRotatable = item.rotatableZ;
+            } else if (item.type === 'box' || item.type === 'carton') {
+                isItemRotatable = true;
+            }
+            if (item.width === item.length) { // No benefit in rotating square items
+                isItemRotatable = false;
+            }
+
+            const orientationsToTry = [{ width: item.width, length: item.length, isRotated: false, name: "Original" }];
+            if (isItemRotatable) {
+                orientationsToTry.push({ width: item.length, length: item.width, isRotated: true, name: "Rotated" });
+            }
 
             // Attempt to place in existing layers
-            for (let layerIdx = 0; layerIdx < layers.length; layerIdx++) {
+            for (let layerIdx = 0; layerIdx < layers.length && !itemHasBeenPlaced; layerIdx++) {
                 const currentLayer = layers[layerIdx];
 
-                if (currentLayer.z + item.height > containerHeight) {
-                    console.log(`Placement3D: Item ${item.name} (H:${item.height}) too tall for layer ${layerIdx} (Z:${currentLayer.z}) in container ID: ${containerId}.`);
-                    continue;
-                }
+                if (currentLayer.z + item.height > containerHeight) continue;
 
-                for (let yPos = 0; yPos <= containerLength - item.length; yPos += gridResolution) {
-                    for (let xPos = 0; xPos <= containerWidth - item.width; xPos += gridResolution) {
-                        if (currentLayer.isAreaFree(xPos, yPos, item.width, item.length)) {
-                            let canStack = true;
-                            if (currentLayer.z > 0) {
-                                const itemsBelow = findItemsBelow(xPos, yPos, item.width, item.length, layerIdx, successfullyPlacedItemsInThisContainer, layers);
-                                if (itemsBelow.length === 0) {
-                                    console.log(`Placement3D: Item ${item.name} at (${xPos},${yPos}) in Layer ${layerIdx} (Z:${currentLayer.z}) has nothing directly below. Stacking check skipped.`);
-                                } else {
-                                    for (const lowerItem of itemsBelow) {
-                                        if (!lowerItem.stackable) {
-                                            canStack = false; break;
-                                        }
-                                        if (item.weight > lowerItem.weight) {
-                                            canStack = false; break;
+                for (const orientation of orientationsToTry) {
+                    const currentWidth = orientation.width;
+                    const currentLength = orientation.length;
+
+                    if (currentWidth > containerWidth || currentLength > containerLength) continue; // Orientation too large for container
+
+                    for (let yPos = 0; yPos <= containerLength - currentLength && !itemHasBeenPlaced; yPos += gridResolution) {
+                        for (let xPos = 0; xPos <= containerWidth - currentWidth && !itemHasBeenPlaced; xPos += gridResolution) {
+                            if (currentLayer.isAreaFree(xPos, yPos, currentWidth, currentLength)) {
+                                let canStack = true;
+                                if (currentLayer.z > 0) {
+                                    const itemsBelow = findItemsBelow(xPos, yPos, currentWidth, currentLength, layerIdx, successfullyPlacedItemsInThisContainer, layers);
+                                    if (itemsBelow.length > 0) {
+                                        for (const lowerItem of itemsBelow) {
+                                            if (!lowerItem.stackable || (lowerItem.placement && !lowerItem.placement.stackable)) { // Check base and placement stackable
+                                                canStack = false; break;
+                                            }
+                                            if (item.weight > lowerItem.weight) {
+                                                canStack = false; break;
+                                            }
                                         }
                                     }
                                 }
+                                if (!canStack) continue;
+
+                                // Place the item
+                                item.id = `item-${containerId}-${successfullyPlacedItemsInThisContainer.length}`;
+                                item.containerName = containerConfig.name;
+                                item.containerId = containerId; // Set on item directly for now
+                                item.x = xPos; // Set on item directly
+                                item.y = yPos; // Set on item directly
+                                item.z = currentLayer.z; // Set on item directly
+                                item.placed = true;
+
+                                item.placement.x = xPos;
+                                item.placement.y = yPos;
+                                item.placement.z = currentLayer.z;
+                                item.placement.layer = layerIdx;
+                                item.placement.containerId = containerId;
+                                item.placement.placedWidth = currentWidth;
+                                item.placement.placedLength = currentLength;
+                                item.placement.rotated = orientation.isRotated;
+                                item.placement.stackable = item.stackable; // Persist stackable state at placement
+
+                                successfullyPlacedItemsInThisContainer.push(item);
+                                currentLayer.markOccupied(xPos, yPos, currentWidth, currentLength, 1);
+                                itemHasBeenPlaced = true;
+                                console.log(`Placement3D: Placed item ${item.name} (ID: ${item.id}, Orientation: ${orientation.name}) in container ${containerId} at Layer ${layerIdx} (X:${xPos}, Y:${yPos}, Z:${currentLayer.z}), Dim: ${currentWidth}x${currentLength}`);
                             }
-                            if (!canStack) continue;
-
-                            // Update the original item object IN PLACE
-                            item.id = `item-${containerId}-${successfullyPlacedItemsInThisContainer.length}`; // Unique ID within this container context
-                            item.containerName = containerConfig.name; // Store container name
-                            item.containerId = containerId; // Store containerId
-                            item.layerIndex = layerIdx;
-                            item.x = xPos;
-                            item.y = yPos;
-                            item.z = currentLayer.z;
-                            item.placed = true;
-                            // Add to a temporary list of successfully placed items for this run
-                            successfullyPlacedItemsInThisContainer.push(item);
-                            // Add to the item itself the placement data for the harness
-                            item.placement = { x: xPos, y: yPos, z: currentLayer.z, layer: layerIdx, containerId: containerId };
-
-
-                            currentLayer.markOccupied(xPos, yPos, item.width, item.length, 1);
-                            itemHasBeenPlaced = true;
-                            console.log(`Placement3D: Placed item ${item.name} (ID: ${item.id}) in container ${containerId} at Layer ${layerIdx} (X:${xPos}, Y:${yPos}, Z:${currentLayer.z})`);
-                            break;
                         }
                     }
-                    if (itemHasBeenPlaced) break;
+                    if (itemHasBeenPlaced) break; // Break from orientation loop if placed
                 }
-                if (itemHasBeenPlaced) break;
             }
 
             // If not placed, try creating a new layer
             if (!itemHasBeenPlaced) {
                 const lastAttemptedLayerZ = layers.length > 0 ? layers[layers.length - 1].z : -1;
+                // determineNextLayerZ uses item's base height. Rotation doesn't change height.
                 const nextZ = determineNextLayerZ(successfullyPlacedItemsInThisContainer, item, containerHeight, lastAttemptedLayerZ);
 
                 if (nextZ !== null && (nextZ + item.height <= containerHeight)) {
                     console.log(`Placement3D: Creating new Layer ${layers.length} at Z=${nextZ} for item ${item.name} in container ${containerId}.`);
                     const newLayer = new Layer(nextZ, containerWidth, containerLength, gridResolution);
-                    projectOccupancyOntoLayer(newLayer, successfullyPlacedItemsInThisContainer, containerHeight);
+                    projectOccupancyOntoLayer(newLayer, successfullyPlacedItemsInThisContainer, containerHeight); // Uses placed dimensions of items below
                     layers.push(newLayer);
 
-                    const currentLayer = newLayer; // The newly added layer
+                    const currentLayer = newLayer;
                     const layerIdx = layers.length - 1;
 
-                    if (currentLayer.z + item.height > containerHeight) {
-                        console.log(`Placement3D: Item ${item.name} too tall for newly created layer ${layerIdx} in container ${containerId}. This shouldn't happen.`);
-                    } else {
-                        for (let yPos = 0; yPos <= containerLength - item.length; yPos += gridResolution) {
-                            for (let xPos = 0; xPos <= containerWidth - item.width; xPos += gridResolution) {
-                                if (currentLayer.isAreaFree(xPos, yPos, item.width, item.length)) {
+                    for (const orientation of orientationsToTry) {
+                        const currentWidth = orientation.width;
+                        const currentLength = orientation.length;
+
+                        if (currentWidth > containerWidth || currentLength > containerLength) continue;
+
+                        for (let yPos = 0; yPos <= containerLength - currentLength && !itemHasBeenPlaced; yPos += gridResolution) {
+                            for (let xPos = 0; xPos <= containerWidth - currentWidth && !itemHasBeenPlaced; xPos += gridResolution) {
+                                if (currentLayer.isAreaFree(xPos, yPos, currentWidth, currentLength)) {
                                     let canStack = true;
                                     if (currentLayer.z > 0) {
-                                        const itemsBelow = findItemsBelow(xPos, yPos, item.width, item.length, layerIdx, successfullyPlacedItemsInThisContainer, layers);
+                                        const itemsBelow = findItemsBelow(xPos, yPos, currentWidth, currentLength, layerIdx, successfullyPlacedItemsInThisContainer, layers);
                                         if (itemsBelow.length > 0) {
                                             for (const lowerItem of itemsBelow) {
-                                                if (!lowerItem.stackable) { canStack = false; break; }
+                                                if (!lowerItem.stackable || (lowerItem.placement && !lowerItem.placement.stackable)) { canStack = false; break; }
                                                 if (item.weight > lowerItem.weight) { canStack = false; break; }
                                             }
                                         }
@@ -272,32 +299,46 @@ const Placement3D = (() => {
                                     item.id = `item-${containerId}-${successfullyPlacedItemsInThisContainer.length}`;
                                     item.containerName = containerConfig.name;
                                     item.containerId = containerId;
-                                    item.layerIndex = layerIdx;
                                     item.x = xPos;
                                     item.y = yPos;
                                     item.z = currentLayer.z;
                                     item.placed = true;
-                                    item.placement = { x: xPos, y: yPos, z: currentLayer.z, layer: layerIdx, containerId: containerId };
+
+                                    item.placement.x = xPos;
+                                    item.placement.y = yPos;
+                                    item.placement.z = currentLayer.z;
+                                    item.placement.layer = layerIdx;
+                                    item.placement.containerId = containerId;
+                                    item.placement.placedWidth = currentWidth;
+                                    item.placement.placedLength = currentLength;
+                                    item.placement.rotated = orientation.isRotated;
+                                    item.placement.stackable = item.stackable;
 
                                     successfullyPlacedItemsInThisContainer.push(item);
-                                    currentLayer.markOccupied(xPos, yPos, item.width, item.length, 1);
+                                    currentLayer.markOccupied(xPos, yPos, currentWidth, currentLength, 1);
                                     itemHasBeenPlaced = true;
-                                    console.log(`Placement3D: Placed item ${item.name} (ID: ${item.id}) in container ${containerId} at NEW Layer ${layerIdx} (X:${xPos}, Y:${yPos}, Z:${currentLayer.z})`);
-                                    break;
+                                    console.log(`Placement3D: Placed item ${item.name} (ID: ${item.id}, Orientation: ${orientation.name}) in container ${containerId} at NEW Layer ${layerIdx} (X:${xPos}, Y:${yPos}, Z:${currentLayer.z}), Dim: ${currentWidth}x${currentLength}`);
                                 }
                             }
-                            if (itemHasBeenPlaced) break;
                         }
+                        if (itemHasBeenPlaced) break; // Break from orientation loop
                     }
                 }
             }
 
             if (!itemHasBeenPlaced) {
                 console.log(`Placement3D: Item ${item.name} could not be placed in container ${containerId}.`);
-                // Mark the original item object as unplaced for the harness
                 item.placed = false;
-                item.placement = { x: 0, y: 0, z: 0, layer: -1, containerId: containerId };
-                // No need to add to a separate unplacedItems list if we mutate in place.
+                // Ensure placement details reflect non-placement or original state for next potential processing
+                item.placement.placedWidth = item.width;
+                item.placement.placedLength = item.length;
+                item.placement.rotated = false;
+                item.placement.x = 0;
+                item.placement.y = 0;
+                item.placement.z = 0;
+                item.placement.layer = -1;
+                // item.placement.containerId should reflect the current containerId for which placement failed
+                item.placement.containerId = containerId;
             }
         } // End loop for items in this container
 
@@ -428,8 +469,10 @@ const Placement3D = (() => {
             // This occurs if pItem's base is below newLayer's base, AND pItem's top is above newLayer's base.
             const pItemTopZ = pItem.z + pItem.height;
             if (pItem.z < newLayer.z && pItemTopZ > newLayer.z) {
-                console.log(`Placement3D: Item ${pItem.name} (ID: ${pItem.id}, Z:${pItem.z}cm, H:${pItem.height}cm, TopZ:${pItemTopZ}cm) projects into layer Z=${newLayer.z}cm. Marking its footprint.`);
-                newLayer.markOccupied(pItem.x, pItem.y, pItem.width, pItem.length, 2); // Mark as type 2 (projection)
+                const placedWidth = (pItem.placement && typeof pItem.placement.placedWidth !== 'undefined') ? pItem.placement.placedWidth : pItem.width;
+                const placedLength = (pItem.placement && typeof pItem.placement.placedLength !== 'undefined') ? pItem.placement.placedLength : pItem.length;
+                console.log(`Placement3D: Item ${pItem.name} (ID: ${pItem.id}, Z:${pItem.z}cm, H:${pItem.height}cm, TopZ:${pItemTopZ}cm) projects into layer Z=${newLayer.z}cm. Marking its footprint (${placedWidth}x${placedLength}).`);
+                newLayer.markOccupied(pItem.x, pItem.y, placedWidth, placedLength, 2); // Mark as type 2 (projection)
             }
         });
     }
