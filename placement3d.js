@@ -467,48 +467,133 @@ const Placement3D = (() => {
      *                          `id` (assigned later by computePlacementTightest).
      */
     function placeSCO(scoItems) {
-        console.log("Placement3D: Allocating SCO items to containers...");
+        console.log("Placement3D: Allocating SCO items to containers (enhanced)...");
+        const allocatedContainersOutput = [];
+        if (!scoItems || scoItems.length === 0) return allocatedContainersOutput;
+
+        if (!ContainerModule || !ContainerModule.getContainerConfig || !ContainerModule.getAvailableContainerTypes) {
+            console.error("Placement3D: ContainerModule not properly set for enhanced placeSCO (missing getContainerConfig or getAvailableContainerTypes).");
+            // Fallback to original simple logic with a default type if advanced functions aren't available
+            return legacyPlaceSCO(scoItems);
+        }
+
+        const totalItemWeight = scoItems.reduce((sum, item) => sum + (parseFloat(item.weight) || 0), 0);
+        const totalItemVolume = scoItems.reduce((sum, item) => {
+            const w = parseFloat(item.width) || 0;
+            const l = parseFloat(item.length) || 0;
+            const h = parseFloat(item.height) || 0;
+            return sum + (w * l * h);
+        }, 0);
+
+        // For representativeItemHeight, use average height of items. Min 1 to avoid division by zero.
+        const totalHeightSum = scoItems.reduce((sum, item) => sum + (parseFloat(item.height) || 1), 0);
+        const representativeItemHeight = scoItems.length > 0 ? Math.max(1, totalHeightSum / scoItems.length) : 50; // Default 50cm if no items or all invalid height
+
+        const availableContainerTypes = ContainerModule.getAvailableContainerTypes(); // e.g., ['20ftGPWood', '40ftGPWood', '40ftHCWood']
+        if (!availableContainerTypes || availableContainerTypes.length === 0) {
+            console.error("Placement3D: No available container types found from ContainerModule. Falling back to legacyPlaceSCO.");
+            return legacyPlaceSCO(scoItems);
+        }
+
+        let bestSingleContainerChoice = null;
+        let bestScore = -1;
+
+        // Try to fit all items into a single best container
+        for (const typeKey of availableContainerTypes) {
+            const config = ContainerModule.getContainerConfig(typeKey);
+            if (!config || !config.usablePayload || !config.usableVolume || !config.height) continue;
+
+            if (totalItemWeight <= config.usablePayload && totalItemVolume <= config.usableVolume) {
+                const potentialLayers = Math.floor(config.height / representativeItemHeight);
+                // Score: Primary: layers. Secondary: negative wasted volume (less waste is better)
+                // Adding a small epsilon to layers to ensure it's prioritized heavily.
+                const currentScore = potentialLayers * 1000000 - (config.usableVolume - totalItemVolume);
+
+
+                if (currentScore > bestScore) {
+                    bestScore = currentScore;
+                    bestSingleContainerChoice = typeKey;
+                } else if (currentScore === bestScore && bestSingleContainerChoice) {
+                    // If scores are equal (same layers, same wasted volume), prefer smaller container by volume
+                    const currentBestConfig = ContainerModule.getContainerConfig(bestSingleContainerChoice);
+                    if (config.usableVolume < currentBestConfig.usableVolume) {
+                        bestSingleContainerChoice = typeKey;
+                    }
+                }
+            }
+        }
+
+        if (bestSingleContainerChoice) {
+            console.log(`Placement3D: Selected single container type ${bestSingleContainerChoice} for all items.`);
+            allocatedContainersOutput.push({
+                type: bestSingleContainerChoice,
+                items: scoItems.map(item => ({ ...item })), // Add copies of items
+                usedWeight: totalItemWeight,
+                usedVolume: totalItemVolume
+                // id will be assigned by computePlacementTightest
+            });
+            return allocatedContainersOutput;
+        } else {
+            // If no single container fits all, fall back to legacy logic for splitting the load.
+            // This part can be enhanced later to pick optimal types for each split part.
+            console.log("Placement3D: No single container type fits all items. Falling back to sequential filling with default type.");
+            return legacyPlaceSCO(scoItems); // Use the original logic for multi-container if no single one fits
+        }
+    }
+
+    // Keep the original placeSCO logic as a fallback or for multi-container scenarios initially
+    function legacyPlaceSCO(scoItems) {
+        console.log("Placement3D: Running legacyPlaceSCO for item allocation.");
         const containers = [];
         if (!scoItems || scoItems.length === 0) return containers;
 
-        if (!ContainerModule || !ContainerModule.getContainerConfig) {
-            console.error("Placement3D: ContainerModule not properly set for placeSCO. Cannot get container config.");
-            // Fallback: return items in a single structure if no container config access
-            return [{ type: "unknown", items: scoItems, usedWeight: 0, usedVolume: 0, id: 0 }];
+        // Attempt to get ContainerModule and a default config, but be more resilient
+        let defaultContainerType = "20ftGPWood"; // Default fallback
+        let cfg = null;
+
+        if (ContainerModule && ContainerModule.getContainerConfig) {
+            // Try to get a list of types and pick the first one as default, or fallback to hardcoded
+            const availableTypes = ContainerModule.getAvailableContainerTypes ? ContainerModule.getAvailableContainerTypes() : [];
+            if (availableTypes.length > 0) {
+                defaultContainerType = availableTypes[0];
+            }
+            cfg = ContainerModule.getContainerConfig(defaultContainerType);
         }
 
-        // Using a default container for this logic, as per user's example structure
-        const defaultContainerType = "20ftGPWood";
-        const cfg = ContainerModule.getContainerConfig(defaultContainerType);
-
-        if (!cfg) {
-            console.error(`Placement3D: Default container type "${defaultContainerType}" config not found for placeSCO.`);
-            // Fallback if default container is missing
-            return [{ type: defaultContainerType, items: scoItems, usedWeight: 0, usedVolume: 0, id: 0 }];
+        if (!cfg) { // If still no config (e.g. ContainerModule missing, or default type not found)
+            console.error(`Placement3D: legacyPlaceSCO - Default container type "${defaultContainerType}" config not found or ContainerModule issue. Cannot perform intelligent allocation.`);
+            // Critical fallback: just put all items in one "unknown" container shell.
+            // This is not ideal but prevents total failure if configs are missing.
+             containers.push({ type: "unknown_fallback", items: scoItems.map(item => ({...item})), usedWeight: 0, usedVolume: 0 });
+             scoItems.forEach(item => {
+                containers[0].usedWeight += parseFloat(item.weight) || 0;
+                const w = parseFloat(item.width) || 0;
+                const l = parseFloat(item.length) || 0;
+                const h = parseFloat(item.height) || 0;
+                containers[0].usedVolume += w * l * h;
+             });
+            return containers;
         }
 
+        console.log(`Placement3D: legacyPlaceSCO using default type: ${defaultContainerType}`);
         let currentContainer = {
             type: defaultContainerType,
             items: [],
             usedWeight: 0,
             usedVolume: 0
-            // id will be added later
         };
 
         for (const item of scoItems) {
-            // Ensure item dimensions are valid numbers before calculating volume
             const w = parseFloat(item.width) || 0;
             const l = parseFloat(item.length) || 0;
             const h = parseFloat(item.height) || 0;
-            const itemVolume = w * l * h; // Volume in cm³
+            const itemVolume = w * l * h;
             const itemWeight = parseFloat(item.weight) || 0;
 
-            // Check if item fits in current container or new one is needed
-            if (currentContainer.items.length > 0 && // Ensure it's not the first item for an empty container
+            if (currentContainer.items.length > 0 &&
                 (currentContainer.usedWeight + itemWeight > cfg.usablePayload ||
-                    currentContainer.usedVolume + itemVolume > cfg.usableVolume)) {
+                 currentContainer.usedVolume + itemVolume > cfg.usableVolume)) {
                 containers.push(currentContainer);
-                console.log(`Placement3D: Filled container (Weight: ${currentContainer.usedWeight.toFixed(2)}/${cfg.usablePayload}, Volume: ${(currentContainer.usedVolume / 1000000).toFixed(2)}m³ / ${(cfg.usableVolume / 1000000).toFixed(2)}m³). Starting new one.`);
                 currentContainer = {
                     type: defaultContainerType,
                     items: [],
@@ -516,7 +601,7 @@ const Placement3D = (() => {
                     usedVolume: 0
                 };
             }
-            currentContainer.items.push({ ...item }); // Add a copy of the item
+            currentContainer.items.push({ ...item });
             currentContainer.usedWeight += itemWeight;
             currentContainer.usedVolume += itemVolume;
         }
@@ -524,7 +609,7 @@ const Placement3D = (() => {
         if (currentContainer.items.length > 0) {
             containers.push(currentContainer);
         }
-        console.log(`Placement3D: Allocated items into ${containers.length} container(s).`);
+        console.log(`Placement3D: legacyPlaceSCO allocated items into ${containers.length} container(s) of type ${defaultContainerType}.`);
         return containers;
     }
 
